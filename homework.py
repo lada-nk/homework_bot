@@ -84,7 +84,7 @@ def check_response(response):
     if type(response['homeworks']) is not list:
         message = (
             f'Некорректный тип данных под ключем homeworks: '
-            f'{type(response['homeworks'])}.'
+            f'{type(response["homeworks"])}.'
         )
         logging.error(message)
         raise TypeError(message)
