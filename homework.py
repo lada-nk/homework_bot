@@ -1,8 +1,10 @@
 import os
+import sys
 import requests
 import telegram
 import logging
 import time
+
 
 from http import HTTPStatus
 from dotenv import load_dotenv
@@ -14,6 +16,8 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 RETRY_PERIOD = 600
+RETRY_PERIOD_IN_SEC = RETRY_PERIOD
+
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
 
@@ -26,17 +30,22 @@ HOMEWORK_VERDICTS = {
 logging.basicConfig(
     level=logging.DEBUG,
     filename='program.log',
-    format='%(asctime)s, %(levelname)s, %(message)s, %(funcName)s'
+    format='%(asctime)s, %(levelname)s, %(message)s, %(funcName)s',
 )
 
-HOMEWORK_KEYS = ("status", "homework_name")
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+handler = logging.StreamHandler(stream=sys.stdout)
+logger.addHandler(handler)
+
+HOMEWORK_KEYS = ('status', 'homework_name')
 
 
 def check_tokens():
     """Проверка доступности переменных окружения."""
     for token_const in (PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID):
         if not token_const:
-            logging.critical(f'Отсутствует {token_const}.')
+            logger.critical(f'Отсутствует {token_const}.')
             raise SystemExit(
                 f'Невозможно запустить програму: отсутствует {token_const}.'
             )
@@ -46,9 +55,11 @@ def send_message(bot, message):
     """Отправляет сообщение в Telegram чат с TELEGRAM_CHAT_ID."""
     try:
         bot.send_message(TELEGRAM_CHAT_ID, message)
-        logging.debug(f'Удачная отправка сообщения {message} в Telegram.')
-    except Exception as error:
-        logging.error(f'Сбой при отправкке сообщения: {error}.')
+    except telegram.error.TelegramError as error:
+        # c "raise telegram.error.TelegramError" pytest не проходит
+        logger.exception(f'Сбой при отправкке сообщения: {error}.')
+
+    logger.debug(f'Удачная отправка сообщения {message} в Telegram.')
 
 
 def get_api_answer(timestamp):
@@ -58,64 +69,53 @@ def get_api_answer(timestamp):
             ENDPOINT, headers=HEADERS, params={'from_date': timestamp}
         )
     except ConnectionError:
-        logging.error(f'Недоступность эндпоинта {ENDPOINT}.')
+        raise ConnectionError(f'Недоступность эндпоинта {ENDPOINT}.')
     except Exception as error:
-        logging.error(f'Ошибка при запросе к основному API: {error}.')
+        raise Exception(f'Ошибка при запросе к основному API: {error}.')
 
     if response.status_code != HTTPStatus.OK:
-        message = (
-            f'Некорректный код ответа от {ENDPOINT}: '
-            f'{response.status_code}.')
-        logging.error(message)
-        raise requests.HTTPError(message)
+        raise requests.HTTPError(
+            f'Некорректный код ответа от {ENDPOINT}'
+            f' - {response.status_code}'
+            f'с параметрами: params="from_date": {timestamp}, '
+            f'headers={HEADERS}. '
+            f'{response}'
+        )
     return response.json()
 
 
 def check_response(response):
     """Проверяет ответ API на соответствие документации."""
-    if type(response) is not dict:
-        message = f'Некорректный тип данных ответа API: {type(response)}.'
-        logging.error(message)
-        raise TypeError(message)
-    if 'homeworks' not in response:
-        message = 'Отсутствует ключ homeworks в ответе API.'
-        logging.error(message)
-        raise KeyError(message)
-    if type(response['homeworks']) is not list:
-        message = (
-            f'Некорректный тип данных под ключем homeworks: '
-            f'{type(response["homeworks"])}.'
+    if not isinstance(response, dict):
+        raise TypeError(
+            f'Некорректный тип данных ответа API: {type(response)}.'
         )
-        logging.error(message)
-        raise TypeError(message)
-    for hw in response['homeworks']:
-        for key in HOMEWORK_KEYS:
-            if key not in hw:
-                message = f'Отсутствует ключ {key} в ответе API.'
-                logging.error(message)
-                raise KeyError(message)
-    return response['homeworks']
+    if 'homeworks' not in response:
+        raise KeyError('Отсутствует ключ homeworks в ответе API.')
+    homeworks = response['homeworks']
+    if not isinstance(homeworks, list):
+        raise TypeError(
+            f'Некорректный тип данных под ключем homeworks: '
+            f'{type(homeworks)}.'
+        )
+    return homeworks
 
 
 def parse_status(homework):
     """Извлекает из информации о домашней работе статус этой работы."""
     for key in HOMEWORK_KEYS:
         if key not in homework:
-            message = f'Отсутствует ключ {key} в ответе API.'
-            logging.error(message)
-            raise KeyError(message)
+            raise KeyError(f'Отсутствует ключ {key} в ответе API.')
     status = homework['status']
     if status not in HOMEWORK_VERDICTS:
-        message = (
+        raise KeyError(
             f'Неожиданный статус домашней работы, '
-            f'в ответе API: {homework["status"]}.'
+            f'в ответе API: {status}.'
         )
-        logging.error(message)
-        raise KeyError(message)
     last_status = []
     homework_name = homework['homework_name']
     if status == last_status:
-        logging.debug('Отсутствует новый статус в ответе API.')
+        logger.debug('Отсутствует новый статус в ответе API.')
     verdict = HOMEWORK_VERDICTS[status]
     last_status.append(status)
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
@@ -128,18 +128,18 @@ def main():
     timestamp = int(time.time())
     while True:
         try:
-            response = get_api_answer(timestamp)
-            homeworks = check_response(response)
+            parsed_response = get_api_answer(timestamp)
+            homeworks = check_response(parsed_response)
             for homework in homeworks:
                 message = parse_status(homework)
                 send_message(bot, message)
-            timestamp = response.get('current_date', int(time.time()))
+            timestamp = parsed_response.get('current_date', int(time.time()))
         except Exception as error:
             message = f'Сбой в работе программы: {error}.'
             send_message(bot, message)
-            logging.error(message)
+            logger.exception(message)
         finally:
-            time.sleep(RETRY_PERIOD)
+            time.sleep(RETRY_PERIOD_IN_SEC)
 
 
 if __name__ == '__main__':
