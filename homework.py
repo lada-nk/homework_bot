@@ -5,7 +5,6 @@ import telegram
 import logging
 import time
 
-
 from http import HTTPStatus
 from dotenv import load_dotenv
 
@@ -41,6 +40,18 @@ logger.addHandler(handler)
 HOMEWORK_KEYS = ('status', 'homework_name')
 
 
+class HTTPStatusException(Exception):
+    """Некорректный код ответа."""
+
+    pass
+
+
+class TelegramError(Exception):
+    """Сбой при отправкке сообщения."""
+
+    pass
+
+
 def check_tokens():
     """Проверка доступности переменных окружения."""
     for token_const in (PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID):
@@ -56,8 +67,8 @@ def send_message(bot, message):
     try:
         bot.send_message(TELEGRAM_CHAT_ID, message)
     except telegram.error.TelegramError as error:
-        # c "raise telegram.error.TelegramError" pytest не проходит
-        logger.exception(f'Сбой при отправкке сообщения: {error}.')
+        raise TelegramError(
+            f'Сбой при отправкке сообщения: {error}.') from error
 
     logger.debug(f'Удачная отправка сообщения {message} в Telegram.')
 
@@ -68,13 +79,15 @@ def get_api_answer(timestamp):
         response = requests.get(
             ENDPOINT, headers=HEADERS, params={'from_date': timestamp}
         )
-    except ConnectionError:
-        raise ConnectionError(f'Недоступность эндпоинта {ENDPOINT}.')
+    except ConnectionError as error:
+        raise ConnectionError(
+            f'Недоступность эндпоинта {ENDPOINT}.'
+        ) from error
     except Exception as error:
-        raise Exception(f'Ошибка при запросе к основному API: {error}.')
+        raise RuntimeError(f'Ошибка при запросе к основному API: {error}.')
 
     if response.status_code != HTTPStatus.OK:
-        raise requests.HTTPError(
+        raise HTTPStatusException(
             f'Некорректный код ответа от {ENDPOINT}'
             f' - {response.status_code}'
             f'с параметрами: params="from_date": {timestamp}, '
@@ -136,8 +149,8 @@ def main():
             timestamp = parsed_response.get('current_date', int(time.time()))
         except Exception as error:
             message = f'Сбой в работе программы: {error}.'
-            send_message(bot, message)
             logger.exception(message)
+            send_message(bot, message)
         finally:
             time.sleep(RETRY_PERIOD_IN_SEC)
 
